@@ -24,8 +24,8 @@
 #include <arpa/inet.h> /* inet_aton */
 #define SOCKET int
 #define INVALID_SOCKET (-1)
+#define SOCKET_ERROR   (-1)
 #else
-#define NOMINMAX
 
 #include <winsock2.h> /* WSAStartup WSACleanup WSAGetLastError */
 #include <WS2tcpip.h>
@@ -48,21 +48,25 @@ class Socket {
     WSADATA wsad = {0};
 #endif /* __linux__ */
 
-    void _makesock(const char *address,
-                   uint16_t port, struct sockaddr_in &sockaddr) {
+    void _makesock(struct sockaddr_in &sockaddr,
+        uint16_t port, const std::string& address) {
         memset(&sockaddr, 0, sizeof(sockaddr));
 #ifdef HAVE_SOCK_SIN_LEN
         sockaddr.sin_len = sizeof(sockaddr);
 #endif
         sockaddr.sin_port = htons(port);
         sockaddr.sin_family = AF_INET;
-        if (inet_aton(address, &sockaddr.sin_addr) == 0) {
+        if (address.empty()) {
+            sockaddr.sin_addr.s_addr = INADDR_ANY;
+            return;
+        }
+        if (inet_aton(address.c_str(), &sockaddr.sin_addr) == 0) {
             throw std::runtime_error("Invailid inet address!");
         }
     }
 
-    std::variant <ntime::time_point, int64_t> _timeout(
-            std::variant <ntime::time_point, int64_t> *pvtp = nullptr) {
+    std::variant<ntime::time_point, int64_t> _timeout(
+        std::variant <ntime::time_point, int64_t> *pvtp = nullptr) {
         auto last = ntime::now();
         if (pvtp == nullptr) return last;
         ntime::time_point tp = std::get<ntime::time_point>(*pvtp);
@@ -113,7 +117,7 @@ class Socket {
         fd = socket(AF_INET, flag, 0);
         if (fd == INVALID_SOCKET) {
             throw std::system_error(errno, std::system_category(),
-                                    "Error: create socket!");
+                "Error: create socket!");
         }
 #if defined(FD_CLOEXEC)
         if (fcntl(FD_CLOEXEC, true) == false) {
@@ -135,16 +139,16 @@ class Socket {
 #endif
         if (sockopt(SOL_SOCKET, SO_REUSEADDR) == false) {
             throw std::system_error(errno, std::system_category(),
-                                    "Error: sockopt SOL_SOCKET SO_REUSEADDR!");
+                "Error: sockopt SOL_SOCKET SO_REUSEADDR!");
         }
         if (sockopt(SOL_SOCKET, SO_KEEPALIVE) == false) {
             throw std::system_error(errno, std::system_category(),
-                                    "Error: sockopt SOL_SOCKET SO_KEEPALIVE!");
+                "Error: sockopt SOL_SOCKET SO_KEEPALIVE!");
         }
         if (flag == SOCK_DGRAM) return;
         if (sockopt(IPPROTO_TCP, TCP_NODELAY) == false) {
             throw std::system_error(errno, std::system_category(),
-                                    "Error: sockopt IPPROTO_TCP TCP_NODELAY!");
+                "Error: sockopt IPPROTO_TCP TCP_NODELAY!");
         }
     }
 
@@ -166,6 +170,8 @@ public:
         }
     }
 
+    Socket(SOCKET sock) : fd(sock) {}
+
     ~Socket() noexcept {
         try {
             _dispose();
@@ -177,13 +183,15 @@ public:
         fd = INVALID_SOCKET;
     }
 
+    bool isOk() { return fd != INVALID_SOCKET; }
+
     bool pollin(long timeout = 1000L) {
         fd_set rfds = {0};
         FD_ZERO(&rfds);
         FD_SET(fd, &rfds);
         struct timeval tv{
-                .tv_sec = timeout / 1000L,
-                .tv_usec = 1000L * (timeout % 1000L)
+            .tv_sec = timeout / 1000L,
+            .tv_usec = 1000L * (timeout % 1000L)
         };
         int rc = ::select((int) fd + 1, &rfds, nullptr, nullptr, &tv);
         return (rc > 0);
@@ -194,63 +202,80 @@ public:
         FD_ZERO(&wfds);
         FD_SET(fd, &wfds);
         struct timeval tv{
-                .tv_sec = timeout / 1000L,
-                .tv_usec = 1000L * (timeout % 1000L)
+            .tv_sec = timeout / 1000L,
+            .tv_usec = 1000L * (timeout % 1000L)
         };
         int rc = ::select((int) fd + 1, nullptr, &wfds, nullptr, &tv);
         return (rc > 0);
     }
 
     bool sockopt(const int level, const int flag,
-                 std::optional <std::pair<const char *, int>> opt = std::nullopt) noexcept {
+        std::optional <std::pair<const char *, int>> opt = std::nullopt) noexcept {
         constexpr static int defopt = 1;
         if (opt.has_value() == false) {
             auto ptr = reinterpret_cast<const char *>(&defopt);
             int size = sizeof(defopt);
             opt = std::make_pair(ptr, size);
         }
-        const int rc = ::setsockopt(fd, level, flag,
-                                    opt->first, opt->second);
-        return (rc != -1);
+        return ::setsockopt(fd, level, flag, opt->first, opt->second) == 0;
     }
 
 #ifdef __linux__
     bool fcntl(const int flag, const bool state = true) noexcept {
         int flags = ::fcntl(fd, F_GETFL, 0);
-        if (flags == -1) return false;  
+        if (flags == SOCKET_ERROR) return false;
         flags = (state) ? (flags | flag) : (flags & ~flag);
         int rc = ::fcntl(fd, F_SETFL, flags);
-        return (rc != -1);
+        return (rc != SOCKET_ERROR);
     }
 #else
 
     bool ioctlsock(const int flag, const bool state = true) noexcept {
         unsigned long _state = state ? 1 : 0;
-        return (ioctlsocket(fd, flag, &_state) == 0);
+        return (ioctlsocket(fd, flag, &_state) == NO_ERROR);
     }
 
 #endif /* __linux__ */
 
-    bool connect(const char *address, uint16_t port, uint32_t timeout = 1000) {
+    bool connect(uint16_t port, const std::string& address,
+        uint32_t timeout = 1000) {
         struct sockaddr_in sockaddr;
-        _makesock(address, port, sockaddr);
-        int rc = ::connect(fd, (struct sockaddr *) &sockaddr, sizeof(sockaddr));
-        if (rc == -1 && _retry() == true) return pollout(timeout);
-        return (rc != -1);
+        _makesock(sockaddr, port, address);
+        int rc = ::connect(fd, (struct sockaddr*)&sockaddr, sizeof(sockaddr));
+        if (rc == SOCKET_ERROR && _retry() == true) return pollout(timeout);
+        return (rc != SOCKET_ERROR);
     }
 
-    bool send(std::vector <uint8_t> &data, uint32_t timeout = 1000UL) {
+    bool bind(uint16_t port,
+        std::optional<const std::string> address = std::nullopt) {
+        struct sockaddr_in sockaddr;
+        _makesock(sockaddr, port, address.value_or(""));
+        int rc = ::bind(fd, (struct sockaddr*)&sockaddr, sizeof(sockaddr));
+        if (rc == SOCKET_ERROR) return false;
+        ::listen(fd, SOMAXCONN);
+        return (rc != SOCKET_ERROR);
+    }
+
+    Socket ready(int *port = nullptr, std::string *address = nullptr) {
+        struct sockaddr_in sockaddr;
+        socklen_t size = sizeof(sockaddr);
+        SOCKET _fd = ::accept(fd, (struct sockaddr*)&sockaddr, &size);
+        if (address != nullptr) *address = inet_ntoa(sockaddr.sin_addr);
+        if (port != nullptr) *port = ntohs(sockaddr.sin_port);
+        return Socket(_fd);
+    }
+
+    bool send(const std::vector<uint8_t> &data, uint32_t timeout = 1000UL) {
         if (data.empty()) return false;
         size_t size = data.size();
-        using std::min;
-        auto _size = min(MAX_SEND_BUFFER_SIZE, size);
+        auto _size = (std::min)(MAX_SEND_BUFFER_SIZE, size);
         if (_size > INT_MAX) return false;
         int __size = static_cast<int>(_size);
         auto ptr = data.data();
         auto start = _timeout();
         while (size) {
             if (auto diff = _timeout(&start);
-                    std::get<int64_t>(diff) > timeout) {
+                std::get<int64_t>(diff) > timeout) {
                 break;
             }
             int rc = 0;
@@ -272,19 +297,19 @@ public:
         return true;
     }
 
-    std::vector <uint8_t> read(size_t size = 0,
-                               uint32_t timeout = 10000UL) {
+    std::vector<uint8_t> read(size_t size = 0,
+        uint32_t timeout = 10000UL) {
         std::vector <uint8_t> data;
         uint8_t buffer[MAX_READ_BUFFER_SIZE] = {0};
         auto start = _timeout();
         for (bool loop = true; loop; loop = true) {
             if (auto diff = _timeout(&start);
-                    std::get<int64_t>(diff) > timeout) {
+                std::get<int64_t>(diff) > timeout) {
                 break;
             }
             int rc = 0;
             if (pollin() == true) {
-                rc = ::recv(fd, (char *) buffer, MAX_READ_BUFFER_SIZE, 0);
+                rc = ::recv(fd, (char*)buffer, MAX_READ_BUFFER_SIZE, 0);
                 // rc = ::read(fd, buffer, MAX_READ_BUFFER_SIZE);
             } else if (data.empty() == true) {
                 continue;

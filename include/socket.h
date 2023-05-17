@@ -38,6 +38,8 @@
 #include <iostream>
 #include <iomanip>
 
+constexpr size_t DEFAULT_TX_TIMEOUT = 1000UL;
+constexpr size_t DEFAULT_RX_TIMEOUT = 30000UL;
 constexpr size_t MAX_SEND_BUFFER_SIZE = 1000000UL;
 constexpr size_t MAX_READ_BUFFER_SIZE = 1024UL;
 
@@ -66,7 +68,7 @@ class Socket {
     }
 
     std::variant<ntime::time_point, int64_t> _timeout(
-        std::variant <ntime::time_point, int64_t> *pvtp = nullptr) {
+        std::variant<ntime::time_point, int64_t> *pvtp = nullptr) {
         auto last = ntime::now();
         if (pvtp == nullptr) return last;
         ntime::time_point tp = std::get<ntime::time_point>(*pvtp);
@@ -185,11 +187,11 @@ public:
 
     bool isOk() { return fd != INVALID_SOCKET; }
 
-    bool pollin(long timeout = 1000L) {
+    bool pollin(const long timeout = DEFAULT_RX_TIMEOUT) {
         fd_set rfds = {0};
         FD_ZERO(&rfds);
         FD_SET(fd, &rfds);
-        struct timeval tv{
+        struct timeval tv {
             .tv_sec = timeout / 1000L,
             .tv_usec = 1000L * (timeout % 1000L)
         };
@@ -197,11 +199,11 @@ public:
         return (rc > 0);
     }
 
-    bool pollout(long timeout = 500L) {
+    bool pollout(const long timeout = DEFAULT_TX_TIMEOUT) {
         fd_set wfds = {0};
         FD_ZERO(&wfds);
         FD_SET(fd, &wfds);
-        struct timeval tv{
+        struct timeval tv {
             .tv_sec = timeout / 1000L,
             .tv_usec = 1000L * (timeout % 1000L)
         };
@@ -210,10 +212,10 @@ public:
     }
 
     bool sockopt(const int level, const int flag,
-        std::optional <std::pair<const char *, int>> opt = std::nullopt) noexcept {
+        std::optional<std::pair<const char*, int>> opt = std::nullopt) noexcept {
         constexpr static int defopt = 1;
         if (opt.has_value() == false) {
-            auto ptr = reinterpret_cast<const char *>(&defopt);
+            auto ptr = reinterpret_cast<const char*>(&defopt);
             int size = sizeof(defopt);
             opt = std::make_pair(ptr, size);
         }
@@ -237,8 +239,8 @@ public:
 
 #endif /* __linux__ */
 
-    bool connect(uint16_t port, const std::string& address,
-        uint32_t timeout = 1000) {
+    bool connect(const uint16_t port, const std::string& address,
+        const uint32_t timeout = DEFAULT_RX_TIMEOUT) {
         struct sockaddr_in sockaddr;
         _makesock(sockaddr, port, address);
         int rc = ::connect(fd, (struct sockaddr*)&sockaddr, sizeof(sockaddr));
@@ -246,7 +248,21 @@ public:
         return (rc != SOCKET_ERROR);
     }
 
-    bool bind(uint16_t port,
+    bool connect(const uint16_t port, const std::string& address,
+        const uint16_t sourcePort, const std::string sourceAddress,
+        const uint32_t timeout = DEFAULT_RX_TIMEOUT) {
+        struct sockaddr_in source;
+        _makesock(source, sourcePort, sourceAddress);
+        int rc = ::bind(fd, (struct sockaddr*)&source, sizeof(source));
+        if (rc == SOCKET_ERROR) return false;
+        struct sockaddr_in target;
+        _makesock(target, port, address);
+        rc = ::connect(fd, (struct sockaddr*)&target, sizeof(target));
+        if (rc == SOCKET_ERROR && _retry() == true) return pollout(timeout);
+        return (rc != SOCKET_ERROR);
+    }
+
+    bool bind(const uint16_t port,
         std::optional<const std::string> address = std::nullopt) {
         struct sockaddr_in sockaddr;
         _makesock(sockaddr, port, address.value_or(""));
@@ -256,7 +272,8 @@ public:
         return (rc != SOCKET_ERROR);
     }
 
-    Socket ready(int *port = nullptr, std::string *address = nullptr) {
+    Socket ready(uint16_t *port = nullptr,
+        std::string *address = nullptr) {
         struct sockaddr_in sockaddr;
         socklen_t size = sizeof(sockaddr);
         SOCKET _fd = ::accept(fd, (struct sockaddr*)&sockaddr, &size);
@@ -265,7 +282,8 @@ public:
         return Socket(_fd);
     }
 
-    bool send(const std::vector<uint8_t> &data, uint32_t timeout = 1000UL) {
+    bool send(const std::vector<uint8_t> &data,
+        const uint32_t timeout = DEFAULT_TX_TIMEOUT) {
         if (data.empty()) return false;
         size_t size = data.size();
         auto _size = (std::min)(MAX_SEND_BUFFER_SIZE, size);
@@ -298,7 +316,7 @@ public:
     }
 
     std::vector<uint8_t> read(size_t size = 0,
-        uint32_t timeout = 10000UL) {
+        const uint32_t timeout = DEFAULT_RX_TIMEOUT) {
         std::vector <uint8_t> data;
         uint8_t buffer[MAX_READ_BUFFER_SIZE] = {0};
         auto start = _timeout();

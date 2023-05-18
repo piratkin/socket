@@ -14,6 +14,8 @@
 #include <cerrno> /* errno */
 #include <cstring> /* memset strerror_r */
 #include <span> /* span */
+#include <iostream>
+#include <iomanip>
 
 #ifdef __linux__
 #include <sys/socket.h> /* socket setsockopt recv */
@@ -26,17 +28,14 @@
 #define INVALID_SOCKET (-1)
 #define SOCKET_ERROR   (-1)
 #else
-
+#pragma warning(disable:4005)
 #include <winsock2.h> /* WSAStartup WSACleanup WSAGetLastError */
+#pragma warning(default:4005) 
 #include <WS2tcpip.h>
-
 #define close closesocket
 #define inet_aton(...) inet_pton(AF_INET, ##__VA_ARGS__)
 #pragma comment(lib, "Ws2_32.lib")
 #endif /* __linux__*/
-
-#include <iostream>
-#include <iomanip>
 
 constexpr size_t DEFAULT_TX_TIMEOUT = 1000UL;
 constexpr size_t DEFAULT_RX_TIMEOUT = 30000UL;
@@ -50,19 +49,21 @@ class Socket {
     WSADATA wsad = {0};
 #endif /* __linux__ */
 
-    void _makesock(struct sockaddr_in &sockaddr,
+
+
+    void _makesock(sockaddr_in &sock,
         uint16_t port, const std::string& address) {
-        memset(&sockaddr, 0, sizeof(sockaddr));
+        memset(&sock, 0, sizeof(sock));
 #ifdef HAVE_SOCK_SIN_LEN
-        sockaddr.sin_len = sizeof(sockaddr);
+        sock.sin_len = sizeof(sock);
 #endif
-        sockaddr.sin_port = htons(port);
-        sockaddr.sin_family = AF_INET;
+        sock.sin_port = htons(port);
+        sock.sin_family = AF_INET;
         if (address.empty()) {
-            sockaddr.sin_addr.s_addr = INADDR_ANY;
+            sock.sin_addr.s_addr = INADDR_ANY;
             return;
         }
-        if (inet_aton(address.c_str(), &sockaddr.sin_addr) == 0) {
+        if (inet_aton(address.c_str(), &sock.sin_addr) == 0) {
             throw std::runtime_error("Invailid inet address!");
         }
     }
@@ -241,9 +242,9 @@ public:
 
     bool connect(const uint16_t port, const std::string& address,
         const uint32_t timeout = DEFAULT_RX_TIMEOUT) {
-        struct sockaddr_in sockaddr;
-        _makesock(sockaddr, port, address);
-        int rc = ::connect(fd, (struct sockaddr*)&sockaddr, sizeof(sockaddr));
+        sockaddr_in sock;
+        _makesock(sock, port, address);
+        int rc = ::connect(fd, (sockaddr*)&sock, sizeof(sock));
         if (rc == SOCKET_ERROR && _retry() == true) return pollout(timeout);
         return (rc != SOCKET_ERROR);
     }
@@ -251,22 +252,22 @@ public:
     bool connect(const uint16_t port, const std::string& address,
         const uint16_t sourcePort, const std::string sourceAddress,
         const uint32_t timeout = DEFAULT_RX_TIMEOUT) {
-        struct sockaddr_in source;
+        sockaddr_in source;
         _makesock(source, sourcePort, sourceAddress);
-        int rc = ::bind(fd, (struct sockaddr*)&source, sizeof(source));
+        int rc = ::bind(fd, (sockaddr*)&source, sizeof(source));
         if (rc == SOCKET_ERROR) return false;
-        struct sockaddr_in target;
+        sockaddr_in target;
         _makesock(target, port, address);
-        rc = ::connect(fd, (struct sockaddr*)&target, sizeof(target));
+        rc = ::connect(fd, (sockaddr*)&target, sizeof(target));
         if (rc == SOCKET_ERROR && _retry() == true) return pollout(timeout);
         return (rc != SOCKET_ERROR);
     }
 
     bool bind(const uint16_t port,
         std::optional<const std::string> address = std::nullopt) {
-        struct sockaddr_in sockaddr;
-        _makesock(sockaddr, port, address.value_or(""));
-        int rc = ::bind(fd, (struct sockaddr*)&sockaddr, sizeof(sockaddr));
+        sockaddr_in sock;
+        _makesock(sock, port, address.value_or(""));
+        int rc = ::bind(fd, (sockaddr*)&sock, sizeof(sock));
         if (rc == SOCKET_ERROR) return false;
         ::listen(fd, SOMAXCONN);
         return (rc != SOCKET_ERROR);
@@ -274,11 +275,11 @@ public:
 
     Socket ready(uint16_t *port = nullptr,
         std::string *address = nullptr) {
-        struct sockaddr_in sockaddr;
-        socklen_t size = sizeof(sockaddr);
-        SOCKET _fd = ::accept(fd, (struct sockaddr*)&sockaddr, &size);
-        if (address != nullptr) *address = inet_ntoa(sockaddr.sin_addr);
-        if (port != nullptr) *port = ntohs(sockaddr.sin_port);
+        sockaddr_in sock;
+        socklen_t size = sizeof(sock);
+        SOCKET _fd = ::accept(fd, (struct sockaddr*)&sock, &size);
+        if (address != nullptr) *address = inet_ntoa(sock.sin_addr);
+        if (port != nullptr) *port = ntohs(sock.sin_port);
         return Socket(_fd);
     }
 

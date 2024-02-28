@@ -1,5 +1,4 @@
 #pragma once
-#include "ntime.h"
 #include <cstdint> /* uintX_t */
 #include <climits> /* INT_MAX */
 #include <vector> /* vector */
@@ -16,6 +15,8 @@
 #include <span> /* span */
 #include <iostream>
 #include <iomanip>
+#include <chrono>
+#include <ctime> /* time_t */
 
 #ifdef __linux__
 #include <sys/socket.h> /* socket setsockopt recv */
@@ -27,12 +28,13 @@
 #define SOCKET int
 #define INVALID_SOCKET (-1)
 #define SOCKET_ERROR   (-1)
+#define closesocket close
 #else
 #pragma warning(disable:4005)
 #include <winsock2.h> /* WSAStartup WSACleanup WSAGetLastError */
 #pragma warning(default:4005) 
 #include <WS2tcpip.h>
-#define close closesocket
+//#define close closesocket
 #define inet_aton(...) inet_pton(AF_INET, ##__VA_ARGS__)
 #pragma comment(lib, "Ws2_32.lib")
 #endif /* __linux__*/
@@ -49,9 +51,7 @@ class Socket {
     WSADATA wsad = {0};
 #endif /* __linux__ */
 
-
-
-    void _makesock(sockaddr_in &sock,
+    static void _makesock(sockaddr_in &sock,
         uint16_t port, const std::string& address) {
         memset(&sock, 0, sizeof(sock));
 #ifdef HAVE_SOCK_SIN_LEN
@@ -64,19 +64,25 @@ class Socket {
             return;
         }
         if (inet_aton(address.c_str(), &sock.sin_addr) == 0) {
-            throw std::runtime_error("Invailid inet address!");
+            throw std::runtime_error("Invalid inet address!");
         }
     }
 
-    std::variant<ntime::time_point, int64_t> _timeout(
-        std::variant<ntime::time_point, int64_t> *pvtp = nullptr) {
-        auto last = ntime::now();
+    static std::variant<std::chrono::time_point<
+        std::chrono::system_clock>, int64_t> _timeout(
+            std::variant<std::chrono::time_point<
+                std::chrono::system_clock>, int64_t> 
+                    *pvtp = nullptr) {
+        auto last = std::chrono::system_clock::now();
         if (pvtp == nullptr) return last;
-        ntime::time_point tp = std::get<ntime::time_point>(*pvtp);
-        return ntime::cast<ntime::ms>(last - tp).count();
+        std::chrono::time_point tp = 
+            std::get<std::chrono::time_point<
+                std::chrono::system_clock>>(*pvtp);
+        return std::chrono::duration_cast<
+            std::chrono::milliseconds>(last - tp).count();
     }
 
-    bool _retry(std::optional<const int> error = std::nullopt) {
+    static bool _retry(std::optional<const int> error = std::nullopt) {
         auto e = error.value_or(_error());
         switch (e) {
             case EAGAIN: /* EWOULDBLOCK */
@@ -101,7 +107,7 @@ class Socket {
         return false;
     }
 
-    int _error() {
+    static int _error() {
 #ifdef __linux__
         int _errno = errno;
 #else
@@ -123,33 +129,33 @@ class Socket {
                 "Error: create socket!");
         }
 #if defined(FD_CLOEXEC)
-        if (fcntl(FD_CLOEXEC, true) == false) {
+        if (!fcntl(FD_CLOEXEC, true)) {
             throw std::system_error(errno, std::system_category(), 
                 "Error: fcntl FD_CLOEXEC!");
         }
 #endif
 #if defined(O_NONBLOCK)
-        if (fcntl(O_NONBLOCK, false) == false) {
+        if (!fcntl(O_NONBLOCK, false)) {
             throw std::system_error(errno, std::system_category(),
                 "Error: fcntl O_NONBLOCK!");
         }
 #endif
 #if defined(FIONBIO) and defined(_MSC_VER)
-        if (ioctlsock(FIONBIO, true) == false) {
+        if (!ioctlsock(FIONBIO, true)) {
             throw std::system_error(errno, std::system_category(),
                 "Error: fcntl FIONBIO!");
         }
 #endif
-        if (sockopt(SOL_SOCKET, SO_REUSEADDR) == false) {
+        if (!sockopt(SOL_SOCKET, SO_REUSEADDR)) {
             throw std::system_error(errno, std::system_category(),
                 "Error: sockopt SOL_SOCKET SO_REUSEADDR!");
         }
-        if (sockopt(SOL_SOCKET, SO_KEEPALIVE) == false) {
+        if (!sockopt(SOL_SOCKET, SO_KEEPALIVE)) {
             throw std::system_error(errno, std::system_category(),
                 "Error: sockopt SOL_SOCKET SO_KEEPALIVE!");
         }
         if (flag == SOCK_DGRAM) return;
-        if (sockopt(IPPROTO_TCP, TCP_NODELAY) == false) {
+        if (!sockopt(IPPROTO_TCP, TCP_NODELAY)) {
             throw std::system_error(errno, std::system_category(),
                 "Error: sockopt IPPROTO_TCP TCP_NODELAY!");
         }
@@ -165,7 +171,7 @@ class Socket {
     }
 
 public:
-    Socket(bool udp = false) noexcept {
+    explicit Socket(bool udp = false) noexcept {
         try {
             _init(udp ? SOCK_DGRAM : SOCK_STREAM);
         } catch (const std::exception &e) {
@@ -173,7 +179,7 @@ public:
         }
     }
 
-    Socket(SOCKET sock) : fd(sock) {}
+    explicit Socket(SOCKET sock) : fd(sock) {}
 
     ~Socket() noexcept {
         try {
@@ -182,13 +188,16 @@ public:
             std::cerr << e.what() << std::endl;
         }
         if (fd == INVALID_SOCKET) return;
-        ::close(fd);
+        ::closesocket(fd);
         fd = INVALID_SOCKET;
     }
 
-    bool isOk() { return fd != INVALID_SOCKET; }
+    [[nodiscard]] bool isOk() const {
+        return fd != INVALID_SOCKET;
+    }
 
-    bool pollin(const long timeout = DEFAULT_RX_TIMEOUT) {
+    [[nodiscard]] bool pollin(
+        const long timeout = DEFAULT_RX_TIMEOUT) const {
         fd_set rfds = {0};
         FD_ZERO(&rfds);
         FD_SET(fd, &rfds);
@@ -200,7 +209,8 @@ public:
         return (rc > 0);
     }
 
-    bool pollout(const long timeout = DEFAULT_TX_TIMEOUT) {
+    [[nodiscard]] bool pollout(
+        const long timeout = DEFAULT_TX_TIMEOUT) const {
         fd_set wfds = {0};
         FD_ZERO(&wfds);
         FD_SET(fd, &wfds);
@@ -208,23 +218,27 @@ public:
             .tv_sec = timeout / 1000L,
             .tv_usec = 1000L * (timeout % 1000L)
         };
-        int rc = ::select((int) fd + 1, nullptr, &wfds, nullptr, &tv);
+        int rc = ::select((int) fd + 1, nullptr, 
+            &wfds, nullptr, &tv);
         return (rc > 0);
     }
 
-    bool sockopt(const int level, const int flag,
-        std::optional<std::pair<const char*, int>> opt = std::nullopt) noexcept {
+    [[nodiscard]] bool sockopt(const int level, const int flag, 
+        std::optional<std::pair< const char*, int>> 
+            opt = std::nullopt) const noexcept {
         constexpr static int defopt = 1;
-        if (opt.has_value() == false) {
+        if (!opt.has_value()) {
             auto ptr = reinterpret_cast<const char*>(&defopt);
             int size = sizeof(defopt);
             opt = std::make_pair(ptr, size);
         }
-        return ::setsockopt(fd, level, flag, opt->first, opt->second) == 0;
+        return ::setsockopt(fd, level, flag, 
+            opt->first, opt->second) == 0;
     }
 
 #ifdef __linux__
-    bool fcntl(const int flag, const bool state = true) noexcept {
+    [[nodiscard]] bool fcntl(const int flag,
+        const bool state = true) const noexcept {
         int flags = ::fcntl(fd, F_GETFL, 0);
         if (flags == SOCKET_ERROR) return false;
         flags = (state) ? (flags | flag) : (flags & ~flag);
@@ -240,42 +254,45 @@ public:
 
 #endif /* __linux__ */
 
-    bool connect(const uint16_t port, const std::string& address,
-        const uint32_t timeout = DEFAULT_RX_TIMEOUT) {
-        sockaddr_in sock;
+    [[nodiscard]] bool connect(const uint16_t port, 
+        const std::string& address, 
+        const uint32_t timeout = DEFAULT_RX_TIMEOUT) const {
+        sockaddr_in sock{};
         _makesock(sock, port, address);
         int rc = ::connect(fd, (sockaddr*)&sock, sizeof(sock));
-        if (rc == SOCKET_ERROR && _retry() == true) return pollout(timeout);
+        if (rc == SOCKET_ERROR && _retry()) return pollout(timeout);
         return (rc != SOCKET_ERROR);
     }
 
-    bool connect(const uint16_t port, const std::string& address,
-        const uint16_t sourcePort, const std::string sourceAddress,
-        const uint32_t timeout = DEFAULT_RX_TIMEOUT) {
-        sockaddr_in source;
+    [[nodiscard]] bool connect(const uint16_t port,
+        const std::string& address, const uint16_t sourcePort,
+        const std::string& sourceAddress,
+        const uint32_t timeout = DEFAULT_RX_TIMEOUT) const {
+        sockaddr_in source{};
         _makesock(source, sourcePort, sourceAddress);
         int rc = ::bind(fd, (sockaddr*)&source, sizeof(source));
         if (rc == SOCKET_ERROR) return false;
-        sockaddr_in target;
+        sockaddr_in target{};
         _makesock(target, port, address);
         rc = ::connect(fd, (sockaddr*)&target, sizeof(target));
-        if (rc == SOCKET_ERROR && _retry() == true) return pollout(timeout);
+        if (rc == SOCKET_ERROR && _retry()) return pollout(timeout);
         return (rc != SOCKET_ERROR);
     }
 
-    bool bind(const uint16_t port,
-        std::optional<const std::string> address = std::nullopt) {
-        sockaddr_in sock;
+    [[nodiscard]] bool bind(const uint16_t port,
+        const std::optional<const std::string>& 
+            address = std::nullopt) const {
+        sockaddr_in sock{};
         _makesock(sock, port, address.value_or(""));
         int rc = ::bind(fd, (sockaddr*)&sock, sizeof(sock));
         if (rc == SOCKET_ERROR) return false;
         ::listen(fd, SOMAXCONN);
-        return (rc != SOCKET_ERROR);
+        return true;
     }
 
     Socket ready(uint16_t *port = nullptr,
-        std::string *address = nullptr) {
-        sockaddr_in sock;
+        std::string *address = nullptr) const {
+        sockaddr_in sock{};
         socklen_t size = sizeof(sock);
         SOCKET _fd = ::accept(fd, (struct sockaddr*)&sock, &size);
         if (address != nullptr) *address = inet_ntoa(sock.sin_addr);
@@ -283,13 +300,13 @@ public:
         return Socket(_fd);
     }
 
-    bool send(const std::vector<uint8_t> &data,
-        const uint32_t timeout = DEFAULT_TX_TIMEOUT) {
+    [[nodiscard]] bool send(const std::vector<uint8_t> &data,
+        const uint32_t timeout = DEFAULT_TX_TIMEOUT) const {
         if (data.empty()) return false;
         size_t size = data.size();
         auto _size = (std::min)(MAX_SEND_BUFFER_SIZE, size);
         if (_size > INT_MAX) return false;
-        int __size = static_cast<int>(_size);
+        int sz = static_cast<int>(_size);
         auto ptr = data.data();
         auto start = _timeout();
         while (size) {
@@ -298,8 +315,8 @@ public:
                 break;
             }
             int rc = 0;
-            if (pollout() == true) {
-                rc = ::send(fd, (const char *) ptr, __size, 0);
+            if (pollout()) {
+                rc = ::send(fd, (const char *) ptr, sz, 0);
             } else if (data.data() == ptr) {
                 continue;
             } else {
@@ -308,16 +325,15 @@ public:
             if (rc > 0) {
                 ptr += rc;
                 size -= rc;
-            } else if (rc == 0 ||
-                       _retry() == false) {
+            } else if (rc == 0 || !_retry()) {
                 return false;
             }
         }
         return true;
     }
 
-    std::vector<uint8_t> read(size_t size = 0,
-        const uint32_t timeout = DEFAULT_RX_TIMEOUT) {
+    [[nodiscard]] std::vector<uint8_t> read(size_t size = 0,
+        const uint32_t timeout = DEFAULT_RX_TIMEOUT) const {
         std::vector <uint8_t> data;
         uint8_t buffer[MAX_READ_BUFFER_SIZE] = {0};
         auto start = _timeout();
@@ -327,10 +343,10 @@ public:
                 break;
             }
             int rc = 0;
-            if (pollin() == true) {
+            if (pollin()) {
                 rc = ::recv(fd, (char*)buffer, MAX_READ_BUFFER_SIZE, 0);
                 // rc = ::read(fd, buffer, MAX_READ_BUFFER_SIZE);
-            } else if (data.empty() == true) {
+            } else if (data.empty()) {
                 continue;
             } else {
                 break;
